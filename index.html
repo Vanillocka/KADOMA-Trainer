@@ -93,11 +93,11 @@
     <span class="muted">
       <b>W</b> accelerate · <b>S</b> brake/reverse<br>
       <b>A / D</b> steer · Space quick stop<br>
-      <b>Q</b> right indicator · <b>E</b> left indicator<br>
+      <b>Q</b> left indicator · <b>E</b> right indicator<br>
       Press Q/E again to cancel manually; indicators also self-cancel after a normal turn when steering returns toward centre.<br><br>
       <b>Mouse checks:</b> in Exterior 3D or Cabin view, hold the <b>right mouse button</b> and drag in the direction you want to look. Drag right = look right; drag left = look left. Release to smoothly recenter.<br>
       View button cycles <b>Exterior 3D → Cabin → 2D</b>.<br>
-      Cabin uses the Khronos Car Concept model, normalized to a Mazda2-like envelope. The imported model is fixed to the car; mouse movement rotates only the driver camera. Exterior and 2D views use the stable native car.
+      Cabin uses a different CC0 city-car model. In cabin mode the car and satellite course are rendered in the same 3D scene; mouse movement rotates only the driver camera.
     </span>
   </div>
 
@@ -127,12 +127,18 @@ const INDICATOR_ON_TIME = INDICATOR_PERIOD / 2;
 const canvas = document.getElementById("glcanvas");
 let externalCarModelReady=false;
 window.__kadomaSetExternalModelReady = (v)=>{ externalCarModelReady=!!v; };
+window.__kadomaSatellite = SATELLITE;
+window.__kadomaWorld = {width:WORLD_W,height:WORLD_H};
 window.__kadomaState = ()=>({
   viewMode,
   cameraScale,
   checkYaw,
   checkPitch,
   car: {
+    x:car.x,
+    z:car.z,
+    yaw:car.yaw,
+    v:car.v,
     steer: car.steer||0,
     indicator: car.indicator,
     indicatorEpoch: car.indicatorEpoch||0
@@ -204,8 +210,8 @@ function toggleHelp(){document.getElementById("help").classList.toggle("hidden")
 addEventListener("keydown",e=>{
   const k=e.key.toLowerCase();
   if(["w","a","s","d","q","e"," "].includes(k)) e.preventDefault();
-  if(k==="q" && !e.repeat) toggleIndicator("R");
-  else if(k==="e" && !e.repeat) toggleIndicator("L");
+  if(k==="q" && !e.repeat) toggleIndicator("L");
+  else if(k==="e" && !e.repeat) toggleIndicator("R");
   else keys[k]=true;
 });
 addEventListener("keyup",e=>{
@@ -765,156 +771,152 @@ requestAnimationFrame(loop);
   const layer=document.getElementById("modelLayer");
   if(!layer) return;
 
-  try{
-    const THREE = await import("https://cdn.jsdelivr.net/npm/three@0.180.0/+esm");
-    const {GLTFLoader} = await import("https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/loaders/GLTFLoader.js/+esm");
+  async function loadThree(){
+    try{
+      const THREE = await import("https://cdn.jsdelivr.net/npm/three@0.180.0/+esm");
+      const mod = await import("https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/loaders/GLTFLoader.js/+esm");
+      return {THREE,GLTFLoader:mod.GLTFLoader};
+    }catch(firstErr){
+      console.warn("jsDelivr Three.js import failed; trying esm.sh",firstErr);
+      const THREE = await import("https://esm.sh/three@0.180.0");
+      const mod = await import("https://esm.sh/three@0.180.0/examples/jsm/loaders/GLTFLoader.js");
+      return {THREE,GLTFLoader:mod.GLTFLoader};
+    }
+  }
 
-    const renderer=new THREE.WebGLRenderer({alpha:true,antialias:true,premultipliedAlpha:true});
+  try{
+    const {THREE,GLTFLoader}=await loadThree();
+
+    const renderer=new THREE.WebGLRenderer({alpha:false,antialias:true});
     renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,2));
-    renderer.setClearColor(0x000000,0);
     renderer.outputColorSpace=THREE.SRGBColorSpace;
     renderer.toneMapping=THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure=1.05;
+    renderer.toneMappingExposure=1.02;
+    renderer.setClearColor(0x8196aa,1);
     layer.replaceChildren(renderer.domElement);
+    layer.style.display="none";
 
     const scene=new THREE.Scene();
-    scene.add(new THREE.HemisphereLight(0xffffff,0x707780,2.2));
-    const key=new THREE.DirectionalLight(0xffffff,2.5);
-    key.position.set(-4,8,-2);
-    scene.add(key);
-    const fill=new THREE.DirectionalLight(0xcadfff,1.1);
-    fill.position.set(5,3,5);
-    scene.add(fill);
+    scene.background=new THREE.Color(0x8196aa);
 
-    const camera=new THREE.PerspectiveCamera(72,1,.01,300);
+    scene.add(new THREE.HemisphereLight(0xffffff,0x65715f,2.0));
+    const sun=new THREE.DirectionalLight(0xffffff,2.2);
+    sun.position.set(-30,80,-20);
+    scene.add(sun);
 
-    // Fixed car-local scene. This group NEVER rotates from mouse-look.
-    // Only the camera orientation changes.
-    const carRoot=new THREE.Group();
-    scene.add(carRoot);
+    const camera=new THREE.PerspectiveCamera(72,1,.015,500);
 
-    const MODEL_URL="https://cdn.jsdelivr.net/gh/KhronosGroup/glTF-Sample-Assets@main/Models/CarConcept/GLB/CarConcept.glb";
-    const TARGET_W=1.695;
-    const TARGET_H=1.500;
-    const TARGET_L=4.080;
+    // ---------- Course ground: SAME scene as cabin ----------
+    const W=window.__kadomaWorld.width;
+    const H=window.__kadomaWorld.height;
 
-    const gltf=await new GLTFLoader().loadAsync(MODEL_URL);
-    const visual=gltf.scene;
-    carRoot.add(visual);
+    const groundGeo=new THREE.BufferGeometry();
+    groundGeo.setAttribute("position",new THREE.Float32BufferAttribute([
+      -W/2,0,-H/2,   W/2,0,-H/2,   W/2,0,H/2,
+      -W/2,0,-H/2,   W/2,0,H/2,    -W/2,0,H/2
+    ],3));
+    groundGeo.setAttribute("uv",new THREE.Float32BufferAttribute([
+      0,0, 1,0, 1,1,
+      0,0, 1,1, 0,1
+    ],2));
 
-    // ----- Canonicalize orientation and scale -----
-    function boundsOf(obj){
-      obj.updateMatrixWorld(true);
-      const b=new THREE.Box3().setFromObject(obj);
-      const s=new THREE.Vector3();
-      const c=new THREE.Vector3();
-      b.getSize(s); b.getCenter(c);
-      return {box:b,size:s,center:c};
-    }
+    const tex=await new THREE.TextureLoader().loadAsync(window.__kadomaSatellite);
+    tex.colorSpace=THREE.SRGBColorSpace;
+    // Browser image -> WebGL upload; this keeps the same image top/bottom convention
+    // as the base game.
+    tex.flipY=true;
+    tex.needsUpdate=true;
 
-    // glTF is normally Y-up. If this model arrives with its longest horizontal
-    // dimension on X, rotate so its length is along Z.
-    let info=boundsOf(visual);
-    if(info.size.x > info.size.z){
-      visual.rotation.y=-Math.PI/2;
-      info=boundsOf(visual);
-    }
-
-    // Detect front/rear from the named lighting materials.
-    function averageZForMaterial(pattern){
-      const zs=[];
-      visual.traverse(o=>{
-        if(!o.isMesh) return;
-        const mats=Array.isArray(o.material)?o.material:[o.material];
-        if(!mats.some(m=>m && pattern.test(m.name||""))) return;
-        const bb=new THREE.Box3().setFromObject(o);
-        if(!bb.isEmpty()){
-          const cc=new THREE.Vector3();
-          bb.getCenter(cc);
-          zs.push(cc.z);
-        }
-      });
-      return zs.length ? zs.reduce((a,b)=>a+b,0)/zs.length : null;
-    }
-
-    const headZ=averageZForMaterial(/headlight/i);
-    const brakeZ=averageZForMaterial(/brakelight/i);
-    if(headZ!==null && brakeZ!==null && headZ<brakeZ){
-      visual.rotation.y+=Math.PI;
-      info=boundsOf(visual);
-    }
-
-    // Centre the footprint and put tyres/body floor at y=0.
-    visual.position.x-=info.center.x;
-    visual.position.z-=info.center.z;
-    visual.position.y-=info.box.min.y;
-    info=boundsOf(visual);
-
-    // Scale to Mazda2-like envelope.
-    carRoot.scale.set(
-      TARGET_W/Math.max(.001,info.size.x),
-      TARGET_H/Math.max(.001,info.size.y),
-      TARGET_L/Math.max(.001,info.size.z)
+    const ground=new THREE.Mesh(
+      groundGeo,
+      new THREE.MeshBasicMaterial({map:tex,side:THREE.DoubleSide})
     );
-    carRoot.updateMatrixWorld(true);
+    ground.position.y=-.015;
+    scene.add(ground);
 
-    // Try to identify steering-wheel geometry by logical node naming.
-    let steeringNode=null;
+    // ---------- Replacement vehicle ----------
+    // DIFFERENT asset from the previous five-door hatchback:
+    // 3DAssets City Car, known axes +Y up / +Z forward and a documented interior.
+    const MODEL_PRIMARY="https://cdn.3dassets.dev/assets/32487/v1/model.glb";
+    // Lightweight fallback if the primary CDN object fails for any reason.
+    const MODEL_FALLBACK="https://cdn.3dassets.dev/assets/15109/v1/model.glb";
+
+    const loader=new GLTFLoader();
+    let gltf;
+    try{
+      gltf=await loader.loadAsync(MODEL_PRIMARY);
+    }catch(primaryErr){
+      console.warn("Primary cabin model failed, trying fallback",primaryErr);
+      gltf=await loader.loadAsync(MODEL_FALLBACK);
+    }
+
+    const vehiclePose=new THREE.Group();
+    scene.add(vehiclePose);
+
+    const visualScale=new THREE.Group();
+    vehiclePose.add(visualScale);
+
+    const visual=gltf.scene;
+    visualScale.add(visual);
+
+    // City car source dimensions: 1.828 × 1.533 × 3.592 m.
+    // Scale to Mazda2-like envelope.
+    const TARGET_W=1.695, TARGET_H=1.500, TARGET_L=4.080;
+    const SRC_W=1.828, SRC_H=1.533, SRC_L=3.592;
+    visualScale.scale.set(TARGET_W/SRC_W,TARGET_H/SRC_H,TARGET_L/SRC_L);
+
+    // This asset is already in metres, origin at footprint centre, tyre contact y=0,
+    // +Y up, +Z forward, so no bounding-box guessing or recentering is required.
+    visual.position.set(0,0,0);
+
+    // Ensure cabin surfaces are visible from inside even if some meshes are one-sided.
     visual.traverse(o=>{
-      if(steeringNode) return;
-      if(/steer.*wheel|steering/i.test(o.name||"")) steeringNode=o;
+      if(!o.isMesh) return;
+      const mats=Array.isArray(o.material)?o.material:[o.material];
+      for(const m of mats){
+        if(m){
+          m.side=THREE.DoubleSide;
+          m.needsUpdate=true;
+        }
+      }
     });
 
-    // If the detected steering wheel is on the left, mirror the car to RHD.
-    // Double-sided materials avoid winding/culling problems from negative X scale.
-    if(steeringNode){
-      const sp=new THREE.Vector3();
-      steeringNode.getWorldPosition(sp);
-      if(sp.x<0){
-        carRoot.scale.x*=-1;
-        visual.traverse(o=>{
-          if(!o.isMesh) return;
-          const mats=Array.isArray(o.material)?o.material:[o.material];
-          for(const m of mats) if(m) m.side=THREE.DoubleSide;
-        });
-        carRoot.updateMatrixWorld(true);
-      }
+    // Steering animation, if present.
+    let mixer=null, steerAction=null, steerDuration=0;
+    const steerClip=(gltf.animations||[]).find(c=>/^steer$/i.test(c.name||"") || /steer/i.test(c.name||""));
+    if(steerClip){
+      mixer=new THREE.AnimationMixer(visual);
+      steerAction=mixer.clipAction(steerClip);
+      steerAction.enabled=true;
+      steerAction.play();
+      steerAction.paused=true;
+      steerDuration=steerClip.duration||1;
     }
 
-    // Determine the actual driver-eye point AFTER all transforms.
-    // Prefer steering-wheel-derived positioning; otherwise use a safe RHD fallback.
-    let eye=new THREE.Vector3(.36,1.30,.05);
-    if(steeringNode){
-      const sp=new THREE.Vector3();
-      steeringNode.getWorldPosition(sp);
-
-      // Right-hand driver eye: just above and behind the steering wheel.
-      eye.set(
-        Math.max(.20,Math.min(.62,Math.abs(sp.x))),
-        Math.max(1.18,Math.min(1.42,sp.y+.48)),
-        Math.max(-.50,Math.min(.45,sp.z-.52))
-      );
-    }
-
-    // Keep camera comfortably inside the cabin even if node metadata is odd.
-    eye.x=Math.abs(eye.x);
-    eye.y=Math.max(1.20,Math.min(1.40,eye.y));
-
-    // Add small amber lamps solely for visual signal feedback in cabin.
+    // Separate amber indicators for obvious visual feedback.
     const amberMat=new THREE.MeshStandardMaterial({
-      color:0xff9b00,emissive:0xff6600,emissiveIntensity:4,roughness:.35
+      color:0xff9c00,emissive:0xff6600,emissiveIntensity:4,roughness:.35
     });
-    const lampGeo=new THREE.BoxGeometry(.09,.09,.12);
+    const lampGeo=new THREE.BoxGeometry(.10,.08,.12);
     const lamps={L:[],R:[]};
-    for(const [x,keyName] of [[-TARGET_W*.44,"L"],[TARGET_W*.44,"R"]]){
-      for(const z of [TARGET_L*.47,-TARGET_L*.47]){
-        const m=new THREE.Mesh(lampGeo,amberMat.clone());
-        m.position.set(x,.50,z);
-        m.visible=false;
-        carRoot.add(m);
-        lamps[keyName].push(m);
+    for(const [x,key] of [[-TARGET_W*.46,"L"],[TARGET_W*.46,"R"]]){
+      for(const z of [TARGET_L*.48,-TARGET_L*.48]){
+        const lamp=new THREE.Mesh(lampGeo,amberMat.clone());
+        lamp.position.set(x,.50,z);
+        lamp.visible=false;
+        vehiclePose.add(lamp);
+        lamps[key].push(lamp);
       }
     }
+
+    // Driver eye in Mazda-sized local car coordinates.
+    // Source steering pivot is at x=+0.35, y=0.71, z=-0.02 => already RHD.
+    // Eye is above/right and behind that steering position.
+    const eyeLocal=new THREE.Vector3(.36,1.31,-.40);
+
+    const localTarget=new THREE.Vector3();
+    const worldEye=new THREE.Vector3();
+    const worldTarget=new THREE.Vector3();
 
     function resize(){
       const r=layer.getBoundingClientRect();
@@ -925,61 +927,79 @@ requestAnimationFrame(loop);
       camera.updateProjectionMatrix();
     }
 
-    // Only cabin mode uses this imported model.
+    function setVehiclePose(s){
+      vehiclePose.position.set(s.car.x,0,s.car.z);
+      // Model nose +Z; base game forward vector is (cos(yaw), sin(yaw)).
+      vehiclePose.rotation.set(0,Math.PI/2-s.car.yaw,0);
+      vehiclePose.updateMatrixWorld(true);
+    }
+
     let last=performance.now()/1000;
     function frame(ms){
       const now=ms/1000;
+      const dt=Math.min(.05,now-last);
       last=now;
+
       const s=window.__kadomaState ? window.__kadomaState() : null;
       resize();
 
-      if(!s){
-        renderer.clear();
+      if(!s || s.viewMode!=="cabin"){
+        layer.style.display="none";
         requestAnimationFrame(frame);
         return;
       }
 
-      carRoot.visible=(s.viewMode==="cabin");
+      layer.style.display="block";
+      setVehiclePose(s);
 
-      // Signal lamps.
+      // Steering animation.
+      if(steerAction && mixer){
+        const maxRoad=39*Math.PI/180;
+        const u=Math.max(0,Math.min(1,.5+.5*((s.car.steer||0)/maxRoad)));
+        steerAction.time=u*steerDuration;
+        mixer.update(0);
+      }
+
+      // Blink indicators at the same 90/min cadence as the game.
       const period=60/90;
       const phase=s.car.indicator ? ((now-(s.car.indicatorEpoch||0))%period) : 0;
       const blinkOn=!!s.car.indicator && phase<period/2;
       for(const m of lamps.L) m.visible=blinkOn && s.car.indicator==="L";
       for(const m of lamps.R) m.visible=blinkOn && s.car.indicator==="R";
 
-      if(s.viewMode==="cabin"){
-        // IMPORTANT: camera position is fixed in the car. Mouse movement changes
-        // only yaw/pitch, never the carRoot transform.
-        camera.position.copy(eye);
+      // IMPORTANT: mouse look changes CAMERA ONLY.
+      // Vehicle pose comes exclusively from driving state above.
+      const yaw=s.checkYaw||0;
+      const pitch=-.015+(s.checkPitch||0);
+      const cp=Math.cos(pitch);
+      const d=35;
 
-        const yaw=s.checkYaw||0;
-        const pitch=-.015+(s.checkPitch||0);
-        const cp=Math.cos(pitch);
-        const d=32;
+      worldEye.copy(eyeLocal);
+      vehiclePose.localToWorld(worldEye);
 
-        // Model canonical forward is +Z, right is +X.
-        camera.up.set(0,1,0);
-        camera.lookAt(
-          eye.x + Math.sin(yaw)*cp*d,
-          eye.y + Math.sin(pitch)*d,
-          eye.z + Math.cos(yaw)*cp*d
-        );
+      localTarget.set(
+        eyeLocal.x + Math.sin(yaw)*cp*d,
+        eyeLocal.y + Math.sin(pitch)*d,
+        eyeLocal.z + Math.cos(yaw)*cp*d
+      );
+      worldTarget.copy(localTarget);
+      vehiclePose.localToWorld(worldTarget);
 
-        renderer.render(scene,camera);
-      }else{
-        renderer.clear();
-      }
+      camera.position.copy(worldEye);
+      camera.up.set(0,1,0);
+      camera.lookAt(worldTarget);
 
+      renderer.render(scene,camera);
       requestAnimationFrame(frame);
     }
 
     if(window.__kadomaSetExternalModelReady) window.__kadomaSetExternalModelReady(true);
-    if(hud) hud.textContent="Cabin: Khronos Car Concept";
+    if(hud) hud.textContent="Cabin: city car loaded";
     requestAnimationFrame(frame);
 
   }catch(err){
-    console.error("Replacement cabin model failed to load",err);
+    console.error("Unified cabin renderer failed",err);
+    layer.style.display="none";
     if(hud) hud.textContent="Cabin model: fallback";
     if(window.__kadomaSetExternalModelReady) window.__kadomaSetExternalModelReady(false);
   }
