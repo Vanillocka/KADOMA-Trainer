@@ -95,9 +95,9 @@
       <b>A / D</b> steer · Space quick stop<br>
       <b>Q</b> right indicator · <b>E</b> left indicator<br>
       Press Q/E again to cancel manually; indicators also self-cancel after a normal turn when steering returns toward centre.<br><br>
-      <b>Mouse checks:</b> in Exterior 3D or Cabin view, hold the <b>right mouse button</b> and drag to look around. Release to smoothly recenter.<br>
+      <b>Mouse checks:</b> in Exterior 3D or Cabin view, hold the <b>right mouse button</b> and drag in the direction you want to look. Drag right = look right; drag left = look left. Release to smoothly recenter.<br>
       View button cycles <b>Exterior 3D → Cabin → 2D</b>.<br>
-      Cabin uses a scaled RHD 3D hatchback model with the driver camera positioned behind the steering wheel. Exterior and 2D views use the stable native car.
+      Cabin uses the Khronos Car Concept model, normalized to a Mazda2-like envelope. The imported model is fixed to the car; mouse movement rotates only the driver camera. Exterior and 2D views use the stable native car.
     </span>
   </div>
 
@@ -236,7 +236,7 @@ canvas.addEventListener("pointermove", e => {
   lastPointerY = e.clientY;
 
   // Dragging the mouse left turns your head left.
-  checkYaw -= dx * 0.0060;
+  checkYaw += dx * 0.0060;
   checkPitch -= dy * 0.0035;
 
   checkYaw = Math.max(-MAX_CHECK_YAW, Math.min(MAX_CHECK_YAW, checkYaw));
@@ -773,87 +773,145 @@ requestAnimationFrame(loop);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,2));
     renderer.setClearColor(0x000000,0);
     renderer.outputColorSpace=THREE.SRGBColorSpace;
-    layer.appendChild(renderer.domElement);
+    renderer.toneMapping=THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure=1.05;
+    layer.replaceChildren(renderer.domElement);
 
     const scene=new THREE.Scene();
-    scene.add(new THREE.HemisphereLight(0xffffff,0x6b7077,2.1));
-    const key=new THREE.DirectionalLight(0xffffff,2.3);
-    key.position.set(-4,8,-3);
+    scene.add(new THREE.HemisphereLight(0xffffff,0x707780,2.2));
+    const key=new THREE.DirectionalLight(0xffffff,2.5);
+    key.position.set(-4,8,-2);
     scene.add(key);
-    const fill=new THREE.DirectionalLight(0xbfd6ff,1.0);
-    fill.position.set(5,3,4);
+    const fill=new THREE.DirectionalLight(0xcadfff,1.1);
+    fill.position.set(5,3,5);
     scene.add(fill);
 
-    const perspective=new THREE.PerspectiveCamera(52,1,.02,300);
-    const ortho=new THREE.OrthographicCamera(-20,20,20,-20,.02,300);
+    const camera=new THREE.PerspectiveCamera(72,1,.01,300);
 
-    const carGroup=new THREE.Group();
-    scene.add(carGroup);
+    // Fixed car-local scene. This group NEVER rotates from mouse-look.
+    // Only the camera orientation changes.
+    const carRoot=new THREE.Group();
+    scene.add(carRoot);
 
-    const visualMirror=new THREE.Group();
-    carGroup.add(visualMirror);
-
-    let visual=null;
-    let mixer=null;
-    let steerAction=null;
-    let steerClipDuration=0;
-
-    // CC0 generic five-door hatchback from 3DAssets.dev.
-    // Source dimensions: 4.342 x 1.952 x 1.464 m (L x W x H in page terminology).
-    const MODEL_URL="https://cdn.3dassets.dev/assets/32486/v1/model.glb";
-
-    // Current Mazda2 target dimensions.
+    const MODEL_URL="https://cdn.jsdelivr.net/gh/KhronosGroup/glTF-Sample-Assets@main/Models/CarConcept/GLB/CarConcept.glb";
     const TARGET_W=1.695;
     const TARGET_H=1.500;
     const TARGET_L=4.080;
 
-    const loader=new GLTFLoader();
-    const gltf=await loader.loadAsync(MODEL_URL);
-    visual=gltf.scene;
+    const gltf=await new GLTFLoader().loadAsync(MODEL_URL);
+    const visual=gltf.scene;
+    carRoot.add(visual);
 
-    // The asset already uses metre units, +Y up, +Z forward, wheel axles on X,
-    // with its origin centred on the footprint and tyres at ground level.
-    // Its steering pivot is documented at x=+0.38 m, so it is already RHD.
-    const SOURCE_W=1.952;
-    const SOURCE_H=1.464;
-    const SOURCE_L=4.342;
-    visual.scale.set(
-      TARGET_W/SOURCE_W,
-      TARGET_H/SOURCE_H,
-      TARGET_L/SOURCE_L
+    // ----- Canonicalize orientation and scale -----
+    function boundsOf(obj){
+      obj.updateMatrixWorld(true);
+      const b=new THREE.Box3().setFromObject(obj);
+      const s=new THREE.Vector3();
+      const c=new THREE.Vector3();
+      b.getSize(s); b.getCenter(c);
+      return {box:b,size:s,center:c};
+    }
+
+    // glTF is normally Y-up. If this model arrives with its longest horizontal
+    // dimension on X, rotate so its length is along Z.
+    let info=boundsOf(visual);
+    if(info.size.x > info.size.z){
+      visual.rotation.y=-Math.PI/2;
+      info=boundsOf(visual);
+    }
+
+    // Detect front/rear from the named lighting materials.
+    function averageZForMaterial(pattern){
+      const zs=[];
+      visual.traverse(o=>{
+        if(!o.isMesh) return;
+        const mats=Array.isArray(o.material)?o.material:[o.material];
+        if(!mats.some(m=>m && pattern.test(m.name||""))) return;
+        const bb=new THREE.Box3().setFromObject(o);
+        if(!bb.isEmpty()){
+          const cc=new THREE.Vector3();
+          bb.getCenter(cc);
+          zs.push(cc.z);
+        }
+      });
+      return zs.length ? zs.reduce((a,b)=>a+b,0)/zs.length : null;
+    }
+
+    const headZ=averageZForMaterial(/headlight/i);
+    const brakeZ=averageZForMaterial(/brakelight/i);
+    if(headZ!==null && brakeZ!==null && headZ<brakeZ){
+      visual.rotation.y+=Math.PI;
+      info=boundsOf(visual);
+    }
+
+    // Centre the footprint and put tyres/body floor at y=0.
+    visual.position.x-=info.center.x;
+    visual.position.z-=info.center.z;
+    visual.position.y-=info.box.min.y;
+    info=boundsOf(visual);
+
+    // Scale to Mazda2-like envelope.
+    carRoot.scale.set(
+      TARGET_W/Math.max(.001,info.size.x),
+      TARGET_H/Math.max(.001,info.size.y),
+      TARGET_L/Math.max(.001,info.size.z)
     );
-    visual.position.set(0,0,0);
-    visual.updateMatrixWorld(true);
+    carRoot.updateMatrixWorld(true);
 
-    visualMirror.scale.set(1,1,1);
-    visualMirror.add(visual);
+    // Try to identify steering-wheel geometry by logical node naming.
+    let steeringNode=null;
+    visual.traverse(o=>{
+      if(steeringNode) return;
+      if(/steer.*wheel|steering/i.test(o.name||"")) steeringNode=o;
+    });
 
-    // Steering clip controls front wheel / steering-wheel animation if supplied.
-    if(gltf.animations && gltf.animations.length){
-      const steerClip=gltf.animations.find(c=>/steer/i.test(c.name||""));
-      if(steerClip){
-        mixer=new THREE.AnimationMixer(visual);
-        steerAction=mixer.clipAction(steerClip);
-        steerAction.enabled=true;
-        steerAction.play();
-        steerAction.paused=true;
-        steerClipDuration=steerClip.duration||1;
+    // If the detected steering wheel is on the left, mirror the car to RHD.
+    // Double-sided materials avoid winding/culling problems from negative X scale.
+    if(steeringNode){
+      const sp=new THREE.Vector3();
+      steeringNode.getWorldPosition(sp);
+      if(sp.x<0){
+        carRoot.scale.x*=-1;
+        visual.traverse(o=>{
+          if(!o.isMesh) return;
+          const mats=Array.isArray(o.material)?o.material:[o.material];
+          for(const m of mats) if(m) m.side=THREE.DoubleSide;
+        });
+        carRoot.updateMatrixWorld(true);
       }
     }
 
-    // Simple emissive indicator lamps so Q/E remain clearly visible even if the
-    // imported model's original lamp materials are not independently controllable.
-    const amber=new THREE.MeshStandardMaterial({
-      color:0xff9400,emissive:0xff6500,emissiveIntensity:4,roughness:.35,metalness:0
+    // Determine the actual driver-eye point AFTER all transforms.
+    // Prefer steering-wheel-derived positioning; otherwise use a safe RHD fallback.
+    let eye=new THREE.Vector3(.36,1.30,.05);
+    if(steeringNode){
+      const sp=new THREE.Vector3();
+      steeringNode.getWorldPosition(sp);
+
+      // Right-hand driver eye: just above and behind the steering wheel.
+      eye.set(
+        Math.max(.20,Math.min(.62,Math.abs(sp.x))),
+        Math.max(1.18,Math.min(1.42,sp.y+.48)),
+        Math.max(-.50,Math.min(.45,sp.z-.52))
+      );
+    }
+
+    // Keep camera comfortably inside the cabin even if node metadata is odd.
+    eye.x=Math.abs(eye.x);
+    eye.y=Math.max(1.20,Math.min(1.40,eye.y));
+
+    // Add small amber lamps solely for visual signal feedback in cabin.
+    const amberMat=new THREE.MeshStandardMaterial({
+      color:0xff9b00,emissive:0xff6600,emissiveIntensity:4,roughness:.35
     });
-    const lampGeo=new THREE.BoxGeometry(.10,.10,.16);
+    const lampGeo=new THREE.BoxGeometry(.09,.09,.12);
     const lamps={L:[],R:[]};
-    for(const [side,keyName] of [[-1,"L"],[1,"R"]]){
-      for(const z of [1.94,-1.94]){
-        const m=new THREE.Mesh(lampGeo,amber.clone());
-        m.position.set(side*.78,.53,z);
+    for(const [x,keyName] of [[-TARGET_W*.44,"L"],[TARGET_W*.44,"R"]]){
+      for(const z of [TARGET_L*.47,-TARGET_L*.47]){
+        const m=new THREE.Mesh(lampGeo,amberMat.clone());
+        m.position.set(x,.50,z);
         m.visible=false;
-        carGroup.add(m);
+        carRoot.add(m);
         lamps[keyName].push(m);
       }
     }
@@ -863,105 +921,66 @@ requestAnimationFrame(loop);
       const w=Math.max(1,Math.floor(r.width));
       const h=Math.max(1,Math.floor(r.height));
       renderer.setSize(w,h,false);
-      perspective.aspect=w/h;
-      perspective.updateProjectionMatrix();
-      return w/h;
+      camera.aspect=w/h;
+      camera.updateProjectionMatrix();
     }
 
+    // Only cabin mode uses this imported model.
     let last=performance.now()/1000;
     function frame(ms){
       const now=ms/1000;
-      const dt=Math.min(.05,now-last); last=now;
+      last=now;
       const s=window.__kadomaState ? window.__kadomaState() : null;
-      const aspect=resize();
+      resize();
 
-      if(s){
-        carGroup.visible = (s.viewMode==="cabin");
-        const steer=s.car.steer||0;
-        const maxRoadSteer=39*Math.PI/180;
-
-        // Sample the model's steer animation across its full range.
-        if(steerAction && mixer){
-          const u=Math.max(0,Math.min(1,.5+.5*(steer/maxRoadSteer)));
-          steerAction.time=u*steerClipDuration;
-          mixer.update(0);
-        }
-
-        const phase=s.car.indicator ? ((now-(s.car.indicatorEpoch||0))%(60/90)) : 0;
-        const blinkOn=!!s.car.indicator && phase<(60/90)/2;
-        for(const m of lamps.L) m.visible=blinkOn && s.car.indicator==="L";
-        for(const m of lamps.R) m.visible=blinkOn && s.car.indicator==="R";
-
-        if(s.viewMode==="3d"){
-          perspective.fov=52;
-          perspective.updateProjectionMatrix();
-          const back=10.5*s.cameraScale;
-          const height=7.0*s.cameraScale;
-          const ahead=10.0;
-          perspective.position.set(0,height,-back);
-
-          const horizontalDistance=back+ahead;
-          const basePitch=Math.atan2(.6-height,horizontalDistance);
-          const yaw=s.checkYaw||0;
-          const pitch=basePitch+(s.checkPitch||0);
-          const cp=Math.cos(pitch);
-          const dist=Math.hypot(horizontalDistance,height-.6);
-          perspective.up.set(0,1,0);
-          perspective.lookAt(
-            Math.sin(yaw)*cp*dist,
-            height+Math.sin(pitch)*dist,
-            -back+Math.cos(yaw)*cp*dist
-          );
-          renderer.render(scene,perspective);
-
-        }else if(s.viewMode==="cabin"){
-          perspective.fov=72;
-          perspective.near=.012;
-          perspective.updateProjectionMatrix();
-
-          // Actual driver-eye region relative to the model's documented coordinates.
-          // Steering pivot is x=+0.38, y=0.67, z=+0.18 before Mazda2 scaling.
-          // The eye is right-side, higher, and ~0.45 m behind the steering wheel.
-          const EYE_X=.36;
-          const EYE_Y=1.28;
-          const EYE_Z=-.28;
-          perspective.position.set(EYE_X,EYE_Y,EYE_Z);
-
-          const yaw=s.checkYaw||0;
-          const pitch=-.015+(s.checkPitch||0);
-          const cp=Math.cos(pitch);
-          const d=35;
-          perspective.up.set(0,1,0);
-          perspective.lookAt(
-            EYE_X+Math.sin(yaw)*cp*d,
-            EYE_Y+Math.sin(pitch)*d,
-            EYE_Z+Math.cos(yaw)*cp*d
-          );
-          renderer.render(scene,perspective);
-
-        }else{
-          const span=40*s.cameraScale;
-          ortho.left=-span*aspect/2;
-          ortho.right=span*aspect/2;
-          ortho.top=span/2;
-          ortho.bottom=-span/2;
-          ortho.updateProjectionMatrix();
-          ortho.position.set(0,90,0);
-          ortho.up.set(0,0,1);
-          ortho.lookAt(0,0,0);
-          renderer.render(scene,ortho);
-        }
+      if(!s){
+        renderer.clear();
+        requestAnimationFrame(frame);
+        return;
       }
+
+      carRoot.visible=(s.viewMode==="cabin");
+
+      // Signal lamps.
+      const period=60/90;
+      const phase=s.car.indicator ? ((now-(s.car.indicatorEpoch||0))%period) : 0;
+      const blinkOn=!!s.car.indicator && phase<period/2;
+      for(const m of lamps.L) m.visible=blinkOn && s.car.indicator==="L";
+      for(const m of lamps.R) m.visible=blinkOn && s.car.indicator==="R";
+
+      if(s.viewMode==="cabin"){
+        // IMPORTANT: camera position is fixed in the car. Mouse movement changes
+        // only yaw/pitch, never the carRoot transform.
+        camera.position.copy(eye);
+
+        const yaw=s.checkYaw||0;
+        const pitch=-.015+(s.checkPitch||0);
+        const cp=Math.cos(pitch);
+        const d=32;
+
+        // Model canonical forward is +Z, right is +X.
+        camera.up.set(0,1,0);
+        camera.lookAt(
+          eye.x + Math.sin(yaw)*cp*d,
+          eye.y + Math.sin(pitch)*d,
+          eye.z + Math.cos(yaw)*cp*d
+        );
+
+        renderer.render(scene,camera);
+      }else{
+        renderer.clear();
+      }
+
       requestAnimationFrame(frame);
     }
 
     if(window.__kadomaSetExternalModelReady) window.__kadomaSetExternalModelReady(true);
-    if(hud) hud.textContent="Cabin model: CC0 hatchback";
+    if(hud) hud.textContent="Cabin: Khronos Car Concept";
     requestAnimationFrame(frame);
 
   }catch(err){
-    console.error("3D car model failed to load",err);
-    if(hud) hud.textContent="Car model: fallback";
+    console.error("Replacement cabin model failed to load",err);
+    if(hud) hud.textContent="Cabin model: fallback";
     if(window.__kadomaSetExternalModelReady) window.__kadomaSetExternalModelReady(false);
   }
 })();
